@@ -4,29 +4,41 @@ import math, random, traceback
 from datetime import datetime
 from typing import List, NamedTuple, Tuple
 from tinygrad import Tensor, TinyJit
+from tinygrad.nn import Linear
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
 from tinygrad.features.search import actions, bufs_from_lin, time_linearizer, get_linearizer_actions
 from tinygrad.nn.optim import Adam
 from tinygrad.helpers import dtypes
-from extra.optimization.extract_policynet import PolicyNet
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 
 
-USE_WANDB = False
+USE_WANDB = True
 BS = 32
 DELTA = 0
 MIN_EPSILON = 0.1
 GAMMA = 0.9
 EXP_REPLAY_SIZE = 10000
 TRAIN_FREQ = 1
-SAVE_FREQ = 1
+SAVE_FREQ = 50
+TARGET_UPDATE_FREQ = 10
+
+INNER = 256
+class DQN:
+  def __init__(self):
+    self.l1 = Linear(1021,INNER)
+    self.l2 = Linear(INNER,INNER)
+    self.l3 = Linear(INNER,1+len(actions))
+  def __call__(self, x):
+    x = self.l1(x).relu()
+    x = self.l2(x).relu().dropout(0.9)
+    return self.l3(x)
 
 class Transition(NamedTuple):
-    cur_feat: List[float]
-    next_feat: List[float]
-    act: int
-    rew: float
-    terminal: bool
+  cur_feat: List[float]
+  next_feat: List[float]
+  act: int
+  rew: float
+  terminal: bool
 
 class ExpReplay:
   def __init__(self):
@@ -61,22 +73,22 @@ class ExpReplay:
     ids = np.random.choice(len(self.cur_feats), BS)
     return self.cur_feats[ids], self.next_feats[ids], self.acts[ids], self.rews[ids], self.terminals[ids]
 
-def calculate_loss(q_net: PolicyNet, target_net: PolicyNet, transitions: Tuple):
-    # Transitions are tuple of shape (states, actions, rewards, next_states, dones)
-    curr_state = Tensor(transitions[0])
-    next_state = Tensor(transitions[1])
-    act = Tensor(transitions[2]).unsqueeze(-1) # dtype=long
-    rew = Tensor(transitions[3]) # TODO clamp between -1 and 1: .clamp(-1, 1) # dtype=float32
-    terminal = Tensor(transitions[4]) #, dtype=DType.int)
-    y = target_net(next_state)
-    max_target_net = y.max(-1)[0]
-    net_pred = q_net(curr_state)
-    is_not_over = (Tensor.ones(*terminal.shape) - terminal)
-    # Bellman equation
-    labels = rew + is_not_over * (GAMMA * max_target_net.detach())
-    y_pred = net_pred.gather(idx=act, dim=-1).squeeze()
-    loss = ((labels - y_pred)**2)
-    return loss.mean()
+def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
+  # Transitions are tuple of shape (states, actions, rewards, next_states, dones)
+  curr_state = Tensor(transitions[0])
+  next_state = Tensor(transitions[1])
+  act = Tensor(transitions[2]).unsqueeze(-1)
+  rew = Tensor(transitions[3]) # TODO: potentially clip rewards
+  terminal = Tensor(transitions[4])
+  y = target_net(next_state)
+  max_target_net = y.max(-1)
+  net_pred = q_net(curr_state)
+  is_not_over = (Tensor.ones(*terminal.shape) - terminal)
+  # Bellman equation
+  labels = rew + is_not_over * (GAMMA * max_target_net.detach())
+  y_pred = net_pred.gather(idx=act, dim=-1).squeeze()
+  loss = (labels - y_pred)**2
+  return loss.mean()
 
 def get_next_action(feat, q_net, target_net, lin, eps):
   # mask valid actions
@@ -156,56 +168,45 @@ def train(ast_strs, q_net, target_net, optim):
       optim.step()
       wandb_log({"loss": loss.numpy()})
       if episode % (TRAIN_FREQ * SAVE_FREQ) == 0:
-        model_path = f"qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_{episode}.tg"
-        state_dict = get_state_dict(q_net)
-        print("state dict", state_dict)
-        safe_save(state_dict, model_path)
-        print("Saved model to", model_path)
+        model_path = f"qnets/qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_ep{episode}.tg"
+        safe_save(get_state_dict(q_net), model_path)
+    if episode % TARGET_UPDATE_FREQ == 0:
+      copy_dqn_to_target(q_net, target_net)
 
 def wandb_log(*args, **kwargs):
   if USE_WANDB: wandb.log(*args, **kwargs)
   else: print(str(args) if len(args) > 0 else "", str(kwargs) if len(kwargs) > 0 else "")
 
+def copy_dqn_to_target(q_net, target_net):
+  state_dict = get_state_dict(q_net)
+  for v in state_dict.values(): v.requires_grad = False
+  load_state_dict(target_net, state_dict, verbose=False)
+  for v in state_dict.values(): v.requires_grad = True
+
 if __name__ == "__main__":
-  print(dtypes.fields())
-  # class Net:
-  #   def __init__(self):
-  #     self.weight = Tensor.ones((2,), dtype=dtypes.double)
-  
-  # state_dict = get_state_dict(Tensor.ones((1,), dtype=dtypes.double))
-  # safe_save(state_dict, "test.tg")
+  if USE_WANDB:
+    try:
+      import wandb
+      wandb.login()
+      run = wandb.init(
+        project="tinygrad-rl",
+        config={
+            "batch_size": BS,
+            "delta": DELTA,
+            "min_epsilon": MIN_EPSILON,
+            "gamma": GAMMA,
+            "exp_replay_size": EXP_REPLAY_SIZE,
+            "train_freq": TRAIN_FREQ,
+            "target_update_freq": TARGET_UPDATE_FREQ,
+        },
+      )
+    except:
+      USE_WANDB = False
 
-
-  # if USE_WANDB:
-  #   try:
-  #     import wandb
-  #     wandb.login()
-  #     run = wandb.init(
-  #       project="tinygrad-rl",
-  #       config={
-  #           "batch_size": BS,
-  #           "delta": DELTA,
-  #           "min_epsilon": MIN_EPSILON,
-  #           "gamma": GAMMA,
-  #           "exp_replay_size": EXP_REPLAY_SIZE,
-  #           "train_freq": TRAIN_FREQ
-  #       },
-  #     )
-  #   except:
-  #     USE_WANDB = False
-
-  # q_net = PolicyNet()
-  # target_net = PolicyNet()
-  # model_path = f"qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_test.tg"
-  # state_dict = get_state_dict(q_net)
-  # print("state dict", state_dict)
-  # safe_save(state_dict, model_path)
-  # print("Saved model to", model_path)
-  # load_state_dict(target_net, get_state_dict(q_net))
-  # if os.path.isfile("/tmp/policynet.safetensors"): load_state_dict(q_net, safe_load("/tmp/policynet.safetensors"))
-  # optim = Adam(get_parameters(q_net))
-
-  # ast_strs = load_worlds()
-  # train(ast_strs, q_net, target_net, optim)
-
- 
+  q_net = DQN()
+  target_net = DQN()
+  copy_dqn_to_target(q_net, target_net)
+  if os.path.isfile("/tmp/dqn.safetensors"): load_state_dict(q_net, safe_load("/tmp/dqn.safetensors"))
+  optim = Adam(get_parameters(q_net))
+  ast_strs = load_worlds()
+  train(ast_strs, q_net, target_net, optim)
