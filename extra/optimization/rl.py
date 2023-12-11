@@ -19,8 +19,9 @@ MIN_EPSILON = 0.1
 GAMMA = 0.9
 EXP_REPLAY_SIZE = 10000
 TRAIN_FREQ = 1
-SAVE_FREQ = 50
-TARGET_UPDATE_FREQ = 10
+SAVE_FREQ = 100
+TARGET_UPDATE_FREQ = 200
+LR = 0.0001
 
 INNER = 256
 class DQN:
@@ -78,7 +79,7 @@ def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   curr_state = Tensor(transitions[0])
   next_state = Tensor(transitions[1])
   act = Tensor(transitions[2]).unsqueeze(-1)
-  rew = Tensor(transitions[3]) # TODO: potentially clip rewards
+  rew = Tensor(transitions[3]).clip(-1, 1)
   terminal = Tensor(transitions[4])
   y = target_net(next_state)
   max_target_net = y.max(-1)
@@ -87,7 +88,7 @@ def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   # Bellman equation
   labels = rew + is_not_over * (GAMMA * max_target_net.detach())
   y_pred = net_pred.gather(idx=act, dim=-1).squeeze()
-  loss = (labels - y_pred)**2
+  loss = (labels - y_pred)**2 # todo should we detach labels here? Also, can we check that the weight of the target net do not change?
   return loss.mean()
 
 def get_next_action(feat, q_net, target_net, lin, eps):
@@ -165,7 +166,7 @@ def train(ast_strs, q_net, target_net, optim):
       loss = calculate_loss(q_net, target_net, batch)
       optim.zero_grad()
       loss.backward()
-      optim.step()
+      optim.step() # TODO: clip gradients that are too large
       wandb_log({"loss": loss.numpy()})
       if episode % (TRAIN_FREQ * SAVE_FREQ) == 0:
         model_path = f"qnets/qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_ep{episode}.tg"
@@ -198,6 +199,7 @@ if __name__ == "__main__":
             "exp_replay_size": EXP_REPLAY_SIZE,
             "train_freq": TRAIN_FREQ,
             "target_update_freq": TARGET_UPDATE_FREQ,
+            "learning_rate": LR,
         },
       )
     except:
@@ -207,6 +209,6 @@ if __name__ == "__main__":
   target_net = DQN()
   copy_dqn_to_target(q_net, target_net)
   if os.path.isfile("/tmp/dqn.safetensors"): load_state_dict(q_net, safe_load("/tmp/dqn.safetensors"))
-  optim = Adam(get_parameters(q_net))
+  optim = Adam(get_parameters(q_net), LR)
   ast_strs = load_worlds()
   train(ast_strs, q_net, target_net, optim)
