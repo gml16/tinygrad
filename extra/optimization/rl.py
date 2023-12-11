@@ -1,13 +1,16 @@
 import os
 import numpy as np
 import math, random, traceback
+from datetime import datetime
 from typing import List, NamedTuple, Tuple
 from tinygrad import Tensor, TinyJit
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
 from tinygrad.features.search import actions, bufs_from_lin, time_linearizer, get_linearizer_actions
 from tinygrad.nn.optim import Adam
+from tinygrad.helpers import dtypes
 from extra.optimization.extract_policynet import PolicyNet
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
+
 
 USE_WANDB = False
 BS = 32
@@ -15,7 +18,8 @@ DELTA = 0
 MIN_EPSILON = 0.1
 GAMMA = 0.9
 EXP_REPLAY_SIZE = 10000
-TRAIN_FREQ = 5
+TRAIN_FREQ = 1
+SAVE_FREQ = 1
 
 class Transition(NamedTuple):
     cur_feat: List[float]
@@ -151,37 +155,57 @@ def train(ast_strs, q_net, target_net, optim):
       loss.backward()
       optim.step()
       wandb_log({"loss": loss.numpy()})
+      if episode % (TRAIN_FREQ * SAVE_FREQ) == 0:
+        model_path = f"qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_{episode}.tg"
+        state_dict = get_state_dict(q_net)
+        print("state dict", state_dict)
+        safe_save(state_dict, model_path)
+        print("Saved model to", model_path)
 
 def wandb_log(*args, **kwargs):
   if USE_WANDB: wandb.log(*args, **kwargs)
   else: print(str(args) if len(args) > 0 else "", str(kwargs) if len(kwargs) > 0 else "")
 
 if __name__ == "__main__":
-  if USE_WANDB:
-    try:
-      import wandb
-      wandb.login()
-      run = wandb.init(
-        project="tinygrad-rl",
-        config={
-            "batch_size": BS,
-            "delta": DELTA,
-            "min_epsilon": MIN_EPSILON,
-            "gamma": GAMMA,
-            "exp_replay_size": EXP_REPLAY_SIZE,
-            "train_freq": TRAIN_FREQ
-        },
-      )
-    except:
-      USE_WANDB = False
+  print(dtypes.fields())
+  # class Net:
+  #   def __init__(self):
+  #     self.weight = Tensor.ones((2,), dtype=dtypes.double)
+  
+  # state_dict = get_state_dict(Tensor.ones((1,), dtype=dtypes.double))
+  # safe_save(state_dict, "test.tg")
 
-  q_net = PolicyNet()
-  target_net = PolicyNet()
-  load_state_dict(target_net, get_state_dict(q_net))
-  if os.path.isfile("/tmp/policynet.safetensors"): load_state_dict(q_net, safe_load("/tmp/policynet.safetensors"))
-  optim = Adam(get_parameters(q_net))
 
-  ast_strs = load_worlds()
-  train(ast_strs, q_net, target_net, optim)
+  # if USE_WANDB:
+  #   try:
+  #     import wandb
+  #     wandb.login()
+  #     run = wandb.init(
+  #       project="tinygrad-rl",
+  #       config={
+  #           "batch_size": BS,
+  #           "delta": DELTA,
+  #           "min_epsilon": MIN_EPSILON,
+  #           "gamma": GAMMA,
+  #           "exp_replay_size": EXP_REPLAY_SIZE,
+  #           "train_freq": TRAIN_FREQ
+  #       },
+  #     )
+  #   except:
+  #     USE_WANDB = False
+
+  # q_net = PolicyNet()
+  # target_net = PolicyNet()
+  # model_path = f"qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_test.tg"
+  # state_dict = get_state_dict(q_net)
+  # print("state dict", state_dict)
+  # safe_save(state_dict, model_path)
+  # print("Saved model to", model_path)
+  # load_state_dict(target_net, get_state_dict(q_net))
+  # if os.path.isfile("/tmp/policynet.safetensors"): load_state_dict(q_net, safe_load("/tmp/policynet.safetensors"))
+  # optim = Adam(get_parameters(q_net))
+
+  # ast_strs = load_worlds()
+  # train(ast_strs, q_net, target_net, optim)
 
  
