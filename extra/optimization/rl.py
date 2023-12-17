@@ -13,16 +13,16 @@ from tinygrad.codegen.linearizer import Linearizer
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 
 
-USE_WANDB = False
+USE_WANDB = True
 BS = 32
-DELTA = 0
+DELTA = 1e-4
 MIN_EPSILON = 0.1
 GAMMA = 0.9
 EXP_REPLAY_SIZE = 10000
 TRAIN_FREQ = 1
 SAVE_FREQ = 100
 TARGET_UPDATE_FREQ = 200
-LR = 0.0001
+LR = 1e-4
 
 INNER = 256
 class DQN:
@@ -93,7 +93,6 @@ def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   return loss.mean()
 
 def get_next_action(feat: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, eps: float) -> Tuple[int, float]:
-  # mask valid actions
   # epsilon-greedy policy
   valid_action_mask = np.zeros((len(actions)+1), dtype=np.float32)
   for x in get_linearizer_actions(lin): valid_action_mask[x] = 1
@@ -105,29 +104,19 @@ def get_next_action(feat: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, 
   return idx, q_val
 
 def get_greedy_action(feat, q_net, target_net, valid_action_mask, doubleLearning=True):
-  inputs = Tensor(feat)# .unsqueeze(0)
-  # q_vals = q_net(Tensor([feat])).exp()[0].numpy()
-  # probs /= sum(probs)
-  print("inputs", inputs)
-  
+  inputs = Tensor(feat)
   if doubleLearning:
     q_vals = q_net(inputs)
   else:
     q_vals = target_net(inputs)
-  print("q_vals", q_vals.numpy().shape)
   q_vals = q_vals.detach()
-  print("val mask", valid_action_mask)
   q_vals = (q_vals + 1e6) * Tensor(valid_action_mask) # hack to select best valid action when all valid actions are negative 
-  # q_vals *= valid_action_mask 
-
-  print("q_vals after val mask", q_vals.numpy())
-  idx = int(q_vals.argmax())
-  print("idx", idx.numpy())
+  idx = q_vals.argmax().cast(dtypes.int64).numpy() # PR to remove the need to do this
   return idx, q_vals
 
 def train(ast_strs, q_net, target_net, optim):
   expreplay = ExpReplay()
-  eps = 0 # TODO hshould be one
+  eps = 1
   episode = 0
   while 1:
     Tensor.no_grad, Tensor.training = True, False
@@ -191,7 +180,6 @@ def copy_dqn_to_target(q_net, target_net):
   for v in state_dict.values(): v.requires_grad = True
 
 # TODO:
-# Finish greedy actions and train
 # Clip grads?
 # Stack past 4 observations as the state
 if __name__ == "__main__":
