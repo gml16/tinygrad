@@ -9,10 +9,11 @@ from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_lo
 from tinygrad.features.search import actions, bufs_from_lin, time_linearizer, get_linearizer_actions
 from tinygrad.nn.optim import Adam
 from tinygrad.helpers import dtypes
+from tinygrad.codegen.linearizer import Linearizer
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 
 
-USE_WANDB = True
+USE_WANDB = False
 BS = 32
 DELTA = 0
 MIN_EPSILON = 0.1
@@ -91,11 +92,11 @@ def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   loss = (labels - y_pred)**2 # todo should we detach labels here? Also, can we check that the weight of the target net do not change?
   return loss.mean()
 
-def get_next_action(feat, q_net, target_net, lin, eps):
+def get_next_action(feat: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, eps: float) -> Tuple[int, float]:
   # mask valid actions
+  # epsilon-greedy policy
   valid_action_mask = np.zeros((len(actions)+1), dtype=np.float32)
   for x in get_linearizer_actions(lin): valid_action_mask[x] = 1
-  # epsilon-greedy policy
   if np.random.random() < eps:
     q_val = np.zeros((len(actions),))
     idx = np.random.choice(len(valid_action_mask), p=valid_action_mask/sum(valid_action_mask))
@@ -104,24 +105,29 @@ def get_next_action(feat, q_net, target_net, lin, eps):
   return idx, q_val
 
 def get_greedy_action(feat, q_net, target_net, valid_action_mask, doubleLearning=True):
-  # inputs = Tensor(feat).unsqueeze(0)
-  q_vals = q_net(Tensor([feat])).exp()[0].numpy()
-
-  q_vals *= valid_action_mask
+  inputs = Tensor(feat)# .unsqueeze(0)
+  # q_vals = q_net(Tensor([feat])).exp()[0].numpy()
   # probs /= sum(probs)
-  # if doubleLearning:
-  #   q_vals = self.dqn.q_network(inputs).detach().squeeze(0)
-  # else:
-  #   q_vals = self.dqn.target_network(
-  #     inputs).detach().squeeze(0)
-  idx = q_vals.max()
-  # greedy_steps = np.array(idx, dtype=np.int32).flatten()
+  print("inputs", inputs)
+  
+  if doubleLearning:
+    q_vals = q_net(inputs)
+  else:
+    q_vals = target_net(inputs)
+  print("q_vals", q_vals.numpy().shape)
+  q_vals = q_vals.detach()
+  print("val mask", valid_action_mask)
+  q_vals = (q_vals + 1e6) * Tensor(valid_action_mask) # hack to select best valid action when all valid actions are negative 
+  # q_vals *= valid_action_mask 
+
+  print("q_vals after val mask", q_vals.numpy())
+  idx = int(q_vals.argmax())
+  print("idx", idx.numpy())
   return idx, q_vals
 
-# @TinyJit
 def train(ast_strs, q_net, target_net, optim):
   expreplay = ExpReplay()
-  eps = 1
+  eps = 0 # TODO hshould be one
   episode = 0
   while 1:
     Tensor.no_grad, Tensor.training = True, False
@@ -169,7 +175,7 @@ def train(ast_strs, q_net, target_net, optim):
       optim.step() # TODO: clip gradients that are too large
       wandb_log({"loss": loss.numpy()})
       if episode % (TRAIN_FREQ * SAVE_FREQ) == 0:
-        model_path = f"qnets/qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_ep{episode}.tg"
+        model_path = f"qnets/qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_ep{episode}.safetensors"
         safe_save(get_state_dict(q_net), model_path)
     if episode % TARGET_UPDATE_FREQ == 0:
       copy_dqn_to_target(q_net, target_net)
@@ -184,6 +190,10 @@ def copy_dqn_to_target(q_net, target_net):
   load_state_dict(target_net, state_dict, verbose=False)
   for v in state_dict.values(): v.requires_grad = True
 
+# TODO:
+# Finish greedy actions and train
+# Clip grads?
+# Stack past 4 observations as the state
 if __name__ == "__main__":
   if USE_WANDB:
     try:
