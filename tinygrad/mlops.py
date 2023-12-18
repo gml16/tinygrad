@@ -91,10 +91,9 @@ class Less(Function):
   def forward(self, x:LazyBuffer, y:LazyBuffer) -> LazyBuffer:
     self.ret = x.e(BinaryOps.CMPLT, y)
     return self.ret
-  
+
   def backward(self, grad_output:LazyBuffer) -> Tuple[Optional[LazyBuffer], Optional[LazyBuffer]]:
-    return self.ret.e(BinaryOps.MUL, grad_output) if self.needs_input_grad[0] else None, \
-      self.ret.const(1).e(BinaryOps.SUB, self.ret).e(BinaryOps.MUL, grad_output) if self.needs_input_grad[1] else None
+    return None, None
 
 class Xor(Function):
   def forward(self, x:LazyBuffer, y:LazyBuffer) -> LazyBuffer:
