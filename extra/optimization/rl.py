@@ -14,7 +14,7 @@ from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 
 
 USE_WANDB = True
-BS = 32
+BS = 4
 DELTA = 1e-4
 MIN_EPSILON = 0.1
 GAMMA = 0.9
@@ -75,6 +75,10 @@ class ExpReplay:
     ids = np.random.choice(len(self.cur_feats), BS)
     return self.cur_feats[ids], self.next_feats[ids], self.acts[ids], self.rews[ids], self.terminals[ids]
 
+def l1_loss_smooth(predictions: Tensor, targets: Tensor, beta = 1.0):
+    diff = predictions-targets
+    return (0.5*diff**2 / beta).clip(0, 0.5) + (diff.abs() - beta).relu()
+
 def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   # Transitions are tuple of shape (states, actions, rewards, next_states, dones)
   curr_state = Tensor(transitions[0])
@@ -89,7 +93,7 @@ def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   # Bellman equation
   labels = rew + is_not_over * (GAMMA * max_target_net.detach())
   y_pred = net_pred.gather(idx=act, dim=-1).squeeze()
-  loss = (labels - y_pred)**2 # todo should we detach labels here? Also, can we check that the weight of the target net do not change?
+  loss = l1_loss_smooth(y_pred, labels)
   return loss.mean()
 
 def get_next_action(feat: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, eps: float) -> Tuple[int, float]:
@@ -103,9 +107,9 @@ def get_next_action(feat: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, 
     idx, q_val = get_greedy_action(feat, q_net, target_net, valid_action_mask)
   return idx, q_val
 
-def get_greedy_action(feat, q_net, target_net, valid_action_mask, doubleLearning=True):
+def get_greedy_action(feat, q_net, target_net, valid_action_mask, double_learning=True):
   inputs = Tensor(feat)
-  if doubleLearning:
+  if double_learning:
     q_vals = q_net(inputs)
   else:
     q_vals = target_net(inputs)
@@ -161,8 +165,8 @@ def train(ast_strs, q_net, target_net, optim):
       loss = calculate_loss(q_net, target_net, batch)
       optim.zero_grad()
       loss.backward()
-      optim.step() # TODO: clip gradients that are too large
-      wandb_log({"loss": loss.numpy()})
+      optim.step()
+      wandb_log({"loss": loss.numpy().tolist(), "loss_grad": loss.grad.numpy().tolist()})
       if episode % (TRAIN_FREQ * SAVE_FREQ) == 0:
         model_path = f"qnets/qnet_{datetime.today().strftime('%Y-%m-%d-%H-%M-%S')}_ep{episode}.safetensors"
         safe_save(get_state_dict(q_net), model_path)
@@ -180,7 +184,6 @@ def copy_dqn_to_target(q_net, target_net):
   for v in state_dict.values(): v.requires_grad = True
 
 # TODO:
-# Clip grads?
 # Stack past 4 observations as the state
 if __name__ == "__main__":
   if USE_WANDB:
