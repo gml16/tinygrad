@@ -1,14 +1,12 @@
-import os
+import math, os, traceback
 import numpy as np
-import math, random, traceback
 from datetime import datetime
 from typing import List, NamedTuple, Tuple
-from tinygrad import Tensor, TinyJit
+from tinygrad import dtypes, Tensor, TinyJit
 from tinygrad.nn import Linear
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
 from tinygrad.features.search import actions, bufs_from_lin, time_linearizer, get_linearizer_actions
 from tinygrad.nn.optim import Adam
-from tinygrad.helpers import dtypes
 from tinygrad.codegen.linearizer import Linearizer
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 
@@ -81,11 +79,12 @@ def l1_loss_smooth(predictions: Tensor, targets: Tensor, beta = 1.0):
 
 def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   # Transitions are tuple of shape (states, actions, rewards, next_states, dones)
-  curr_state = Tensor(transitions[0])
-  next_state = Tensor(transitions[1])
-  act = Tensor(transitions[2]).unsqueeze(-1)
-  rew = Tensor(transitions[3]).clip(-1, 1)
+  curr_state = Tensor(transitions[0], dtype=dtypes.float32)
+  next_state = Tensor(transitions[1], dtype=dtypes.float32)
+  act = Tensor(transitions[2], dtype=dtypes.int32).unsqueeze(-1)
+  rew = Tensor(transitions[3], dtype=dtypes.float32).clip(-1, 1)
   terminal = Tensor(transitions[4])
+
   y = target_net(next_state)
   max_target_net = y.max(-1)
   net_pred = q_net(curr_state)
@@ -115,7 +114,7 @@ def get_greedy_action(feat, q_net, target_net, valid_action_mask, double_learnin
     q_vals = target_net(inputs)
   q_vals = q_vals.detach()
   q_vals = (q_vals + 1e6) * Tensor(valid_action_mask) # hack to select best valid action when all valid actions are negative 
-  idx = q_vals.argmax().cast(dtypes.int64).numpy() # PR to remove the need to do this
+  idx = q_vals.argmax().cast(dtypes.int32).numpy() # PR to remove the need to do this
   return idx, q_vals
 
 def train(ast_strs, q_net, target_net, optim):
