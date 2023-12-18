@@ -425,5 +425,46 @@ class TestZeroShapeTensor(unittest.TestCase):
     np.testing.assert_equal(Tensor([]).sum().numpy(), 0)
     np.testing.assert_equal(Tensor([]).mean().numpy(), 0)
 
+class TestMLOps(unittest.TestCase):
+  def test_less_backward_1(self):
+    from tinygrad.nn.optim import SGD
+    from tinygrad.nn.state import get_parameters
+    from tinygrad.nn import Linear
+    def relu_(t): return t * (t > 0)
+    class Net:
+      def __init__(self): self.w = Tensor([[-1, 0, 1], [0.5, 0.25, -1], [1, 1, 0]])
+      def __call__(self, x: Tensor): return self.w.dot(x)
+    net = Net()
+    optim = SGD(get_parameters(net))
+    rd = Tensor.randn(3)
+    print("rd", rd.numpy())
+    # rd = Tensor([-1, 1000, 1])
+    # print("net", (net(rd)).numpy())
+    loss = relu_(net(rd)).mean()
+    print("net rd", net(rd).numpy())
+    loss.backward()
+    grad = net.w.grad.numpy()
+    optim.zero_grad()
+    loss = net(rd).relu().mean()
+    loss.backward()
+    np.testing.assert_equal(grad, net.w.grad.numpy())
+
+  def test_less_backward_2(self):
+    from tinygrad.nn.optim import SGD
+    from tinygrad.nn.state import get_parameters
+    from tinygrad.nn import Linear
+    class Net:
+      def __init__(self): self.w = Tensor([[-1, 0, 1], [0.5, 0.25, -1], [1, 1, 0]])
+      def __call__(self, x: Tensor): return self.w.dot(x)
+    net = Net()
+    SGD(get_parameters(net))
+    rd = Tensor([-1, 1000, 1])
+    loss = net(rd).relu().mean()
+    loss.backward()
+    print("test", net.w.grad.numpy())
+    print("weights", net.w.numpy())
+    np.testing.assert_equal(0, net.w.grad.numpy())
+    # np.testing.assert_equal(b_grad, net.l1.bias.grad.numpy())
+
 if __name__ == '__main__':
   unittest.main()

@@ -9,17 +9,20 @@ from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_lo
 from tinygrad.features.search import bufs_from_lin, time_linearizer, actions, get_linearizer_actions
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 from extra.optimization.extract_policynet import PolicyNet
+from extra.optimization.rl import DQN
 from extra.optimization.pretrain_valuenet import ValueNet
 
 VALUE = getenv("VALUE")
 
 if __name__ == "__main__":
-  if VALUE:
-    net = ValueNet()
-    load_state_dict(net, safe_load("/tmp/valuenet.safetensors"))
-  else:
-    net = PolicyNet()
-    load_state_dict(net, safe_load("/tmp/policynet.safetensors"))
+  # if VALUE:
+  #   net = ValueNet()
+  #   load_state_dict(net, safe_load("/tmp/valuenet.safetensors"))
+  # else:
+  #   net = PolicyNet()
+  #   load_state_dict(net, safe_load("/tmp/policynet.safetensors"))
+  net = DQN()
+  load_state_dict(net, safe_load("qnets/qnet_2023-12-11-02-55-15_ep400.tg"))
 
   ast_strs = load_worlds()
 
@@ -41,18 +44,18 @@ if __name__ == "__main__":
     pred_time = float('nan')
     tm = float('inf')
     while 1:
-      if VALUE:
-        acts,feats = [], []
-        for k,v in get_linearizer_actions(lin).items():
-          acts.append(k)
-          feats.append(lin_to_feats(v))
-        preds = net(Tensor(feats))
-        pred_time = math.exp(preds.numpy().min())
-        act = acts[preds.numpy().argmin()]
-      else:
-        probs = net(Tensor([lin_to_feats(lin)]))
-        dist = probs.exp().numpy()
-        act = dist.argmax()
+      # if VALUE:
+      #   acts,feats = [], []
+      #   for k,v in get_linearizer_actions(lin).items():
+      #     acts.append(k)
+      #     feats.append(lin_to_feats(v))
+      #   preds = net(Tensor(feats))
+      #   pred_time = math.exp(preds.numpy().min())
+      #   act = acts[preds.numpy().argmin()]
+      # else:
+      probs = net(Tensor([lin_to_feats(lin)]))
+      dist = probs.exp().numpy()
+      act = dist.argmax()
       if act == 0: break
       try:
         lin.apply_opt(actions[act-1])

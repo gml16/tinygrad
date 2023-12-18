@@ -47,7 +47,7 @@ from tinygrad.shape.symbolic import Node
 MAX_DIMS = 16
 MAX_BUFS = 9
 def lin_to_feats(lin:Linearizer, use_sts=True):
-  assert lin.shape_len < MAX_DIMS, "too many dims"
+  assert lin.shape_len < MAX_DIMS, f"too many dims ({MAX_DIMS=}, {lin.shape_len=}) for {lin.colored_shape()}"
 
   all_colors = ["blue", "cyan", "white", "green", "red", "magenta", "yellow"]
   lc = [all_colors.index(x) for x in lin.colors()]
