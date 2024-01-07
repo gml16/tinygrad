@@ -22,7 +22,7 @@ class Net:
 net = Net()
 optim = Adam(get_parameters(net), 1e-3)
 
-loss = l1_loss_smooth_2(net(Tensor.randn(1021)), Tensor.randn(10)).mean()
+loss = l1_loss_smooth(net(Tensor.randn(1021)), Tensor.randn(10)).mean()
 # optim.zero_grad()
 loss.backward()
 # optim.step()
