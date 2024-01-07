@@ -2,7 +2,8 @@ from __future__ import annotations
 from typing import Tuple, Optional, List
 import ctypes, functools
 import gpuctypes.opencl as cl
-from tinygrad.helpers import init_c_var, to_char_p_p, from_mv, diskcache, OSX, ImageDType, DEBUG
+from tinygrad.helpers import init_c_var, to_char_p_p, from_mv, OSX, DEBUG
+from tinygrad.dtype import ImageDType
 from tinygrad.codegen.kernel import LinearizerOptions
 from tinygrad.renderer.cstyle import OpenCLRenderer
 from tinygrad.device import Compiled, LRUAllocator
@@ -14,7 +15,6 @@ def check(status):
   if status != 0: raise RuntimeError(f"OpenCL Error {status}")
 def checked(ret, status): return (check(status.value), ret)[1]
 
-@diskcache
 def compile_cl(prg:str) -> bytes:
   assert CLDevice.compiler_context is not None, 'OpenCL requires a "compiler_context" to compile, init a device before you call this'
   program = checked(cl.clCreateProgramWithSource(CLDevice.compiler_context.context, 1, to_char_p_p([prg_bytes := prg.encode()]),
@@ -51,8 +51,8 @@ class CLProgram:
     check(cl.clEnqueueNDRangeKernel(self.device.queue, self.kernel, len(global_size), None, (ctypes.c_size_t * len(global_size))(*global_size), (ctypes.c_size_t * len(local_size))(*local_size) if local_size else None, 0, None, event))  # noqa: E501
     if wait:
       check(cl.clWaitForEvents(1, ctypes.byref(event)))
-      start = init_c_var(ctypes.c_ulong(), lambda x: check(cl.clGetEventProfilingInfo(event, cl.CL_PROFILING_COMMAND_START, ctypes.sizeof(x), ctypes.byref(x), None)))  # noqa: E501
-      end = init_c_var(ctypes.c_ulong(), lambda x: check(cl.clGetEventProfilingInfo(event, cl.CL_PROFILING_COMMAND_END, ctypes.sizeof(x), ctypes.byref(x), None)))  # noqa: E501
+      start = init_c_var(ctypes.c_uint64(), lambda x: check(cl.clGetEventProfilingInfo(event, cl.CL_PROFILING_COMMAND_START, ctypes.sizeof(x), ctypes.byref(x), None)))  # noqa: E501
+      end = init_c_var(ctypes.c_uint64(), lambda x: check(cl.clGetEventProfilingInfo(event, cl.CL_PROFILING_COMMAND_END, ctypes.sizeof(x), ctypes.byref(x), None)))  # noqa: E501
       return float(end.value-start.value) * OSX_TIMING_RATIO * 1e-9
     return None
 
