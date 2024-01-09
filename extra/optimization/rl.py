@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import math, random, traceback
+import math, traceback
 from datetime import datetime
 from typing import List, NamedTuple, Tuple
 from tinygrad import Tensor, TinyJit
@@ -8,21 +8,24 @@ from tinygrad.nn import Linear
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
 from tinygrad.features.search import actions, bufs_from_lin, time_linearizer, get_linearizer_actions
 from tinygrad.nn.optim import Adam
-from tinygrad.helpers import dtypes
+from tinygrad.tensor import dtypes
 from tinygrad.codegen.linearizer import Linearizer
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 
 
-USE_WANDB = True
+USE_WANDB = False
+SAVED_MODEL_PATH = "/tmp/dqn.safetensors" # if path does not exist the model is initialised from scratch
 BS = 4
 DELTA = 1e-4
 MIN_EPSILON = 0.1
 GAMMA = 0.9
 EXP_REPLAY_SIZE = 10000
 TRAIN_FREQ = 1
+EVAL_FREQ = 100
 SAVE_FREQ = 100
 TARGET_UPDATE_FREQ = 200
 LR = 1e-4
+RNG_SEED = 0
 
 INNER = 256
 class DQN:
@@ -107,7 +110,7 @@ def get_next_action(feat: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, 
     idx, q_val = get_greedy_action(feat, q_net, target_net, valid_action_mask)
   return idx, q_val
 
-def get_greedy_action(feat, q_net, target_net, valid_action_mask, double_learning=True):
+def get_greedy_action(feat, q_net, target_net, valid_action_mask, double_learning=True) -> Tuple[int, Tensor]:
   inputs = Tensor(feat)
   if double_learning:
     q_vals = q_net(inputs)
@@ -158,7 +161,6 @@ def train(ast_strs, q_net, target_net, optim):
     eps = max(MIN_EPSILON, eps-DELTA)
     print(f"***** {episode=} {step=} {eps=} {base_tm*1e6:12.2f} -> {tm*1e6:12.2f} : {lin.colored_shape()}")
     wandb_log({"episode": episode, "epsilon": eps, "steps": step, "tm_diff": (base_tm-last_tm)/base_tm})
-
     if episode % TRAIN_FREQ == 0:
       Tensor.no_grad, Tensor.training = False, True
       batch = expreplay.sample()
@@ -172,6 +174,40 @@ def train(ast_strs, q_net, target_net, optim):
         safe_save(get_state_dict(q_net), model_path)
     if episode % TARGET_UPDATE_FREQ == 0:
       copy_dqn_to_target(q_net, target_net)
+    if episode % EVAL_FREQ == 0:
+      evaluate_net(episode, ast_strs, q_net, target_net)
+
+def evaluate_net(episode, ast_strs, q_net, target_net):
+  Tensor.no_grad, Tensor.training = True, False
+  tries = 0
+  while 1:
+    idx = np.random.choice(ast_strs)
+    lin = ast_str_to_lin(idx)
+    try:
+      next_feat = lin_to_feats(lin)
+      rawbufs = bufs_from_lin(lin)
+      last_tm = base_tm = time_linearizer(lin, rawbufs)
+      break
+    except:
+      tries += 1
+      if tries > 10:
+        print("lin to time during evaluation failed 10 times")
+        break
+      continue
+  while 1:
+    cur_feat = next_feat
+    act, _ = get_next_action(cur_feat, q_net, target_net, lin, eps=0)
+    if act == 0:
+      break
+    try:
+      lin.apply_opt(actions[act-1])
+      next_feat = lin_to_feats(lin)
+      tm = time_linearizer(lin, rawbufs)
+      if math.isinf(tm): raise Exception("failed")
+      last_tm = tm
+    except:
+      break
+    wandb_log({"episode": episode, "eval_tm_diff": (base_tm-last_tm)/base_tm})
 
 def wandb_log(*args, **kwargs):
   if USE_WANDB: wandb.log(*args, **kwargs)
@@ -183,33 +219,43 @@ def copy_dqn_to_target(q_net, target_net):
   load_state_dict(target_net, state_dict, verbose=False)
   for v in state_dict.values(): v.requires_grad = True
 
-# TODO:
-# Stack past 4 observations as the state
-if __name__ == "__main__":
+def main():
   if USE_WANDB:
-    try:
-      import wandb
-      wandb.login()
-      run = wandb.init(
-        project="tinygrad-rl",
-        config={
-            "batch_size": BS,
-            "delta": DELTA,
-            "min_epsilon": MIN_EPSILON,
-            "gamma": GAMMA,
-            "exp_replay_size": EXP_REPLAY_SIZE,
-            "train_freq": TRAIN_FREQ,
-            "target_update_freq": TARGET_UPDATE_FREQ,
-            "learning_rate": LR,
-        },
-      )
-    except:
-      USE_WANDB = False
-
+    wandb.login()
+    run = wandb.init(
+      project="tinygrad-rl",
+      config={
+          "batch_size": BS,
+          "delta": DELTA,
+          "min_epsilon": MIN_EPSILON,
+          "gamma": GAMMA,
+          "exp_replay_size": EXP_REPLAY_SIZE,
+          "train_freq": TRAIN_FREQ,
+          "target_update_freq": TARGET_UPDATE_FREQ,
+          "learning_rate": LR,
+          "dqn_layers": " / ".join(list(get_state_dict(DQN()).keys())),
+          "dqn_inner_size": INNER,
+          "rng_seed": RNG_SEED
+      },
+    )
+   
+  np.random.seed(RNG_SEED)
   q_net = DQN()
   target_net = DQN()
   copy_dqn_to_target(q_net, target_net)
-  if os.path.isfile("/tmp/dqn.safetensors"): load_state_dict(q_net, safe_load("/tmp/dqn.safetensors"))
+  if os.path.isfile(SAVED_MODEL_PATH): 
+    print(f"loading model from {SAVED_MODEL_PATH}")
+    load_state_dict(q_net, safe_load(SAVED_MODEL_PATH))
+  else: print(f"no model to load from {SAVED_MODEL_PATH}")
   optim = Adam(get_parameters(q_net), LR)
   ast_strs = load_worlds()
   train(ast_strs, q_net, target_net, optim)
+
+# TODO:
+# Stack past 4 observations as the state
+if __name__ == "__main__":
+  try:
+    import wandb
+  except:
+    USE_WANDB = False
+  main()
