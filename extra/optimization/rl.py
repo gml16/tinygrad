@@ -37,7 +37,7 @@ class DQN:
     self.l2 = Linear(INNER,INNER)
     self.l3 = Linear(INNER,1+len(actions))
   def __call__(self, x: Tensor) -> Tensor:
-    x = x.reshape(BS, OBS_STACK*LIN_FEAT_SIZE, *x.shape[3:])
+    x = x.reshape(-1, OBS_STACK*LIN_FEAT_SIZE, *x.shape[3:])
     x = self.l1(x).relu()
     x = self.l2(x).relu().dropout(0.9)
     return self.l3(x)
@@ -88,10 +88,6 @@ def l1_loss_smooth(predictions: Tensor, targets: Tensor, beta = 1.0):
     diff = predictions-targets
     return (0.5*diff**2 / beta).clip(0, 0.5) + (diff.abs() - beta).relu()
 
-def l1_loss_smooth(predictions: Tensor, targets: Tensor, beta = 1.0):
-    diff = predictions-targets
-    return (0.5*diff**2 / beta).clip(0, 0.5) + (diff.abs() - beta).relu()
-
 def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   # Transitions are tuple of shape (states, actions, rewards, next_states, dones)
   curr_state, next_state, act, rew, terminal = transitions
@@ -107,27 +103,25 @@ def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   loss = l1_loss_smooth(y_pred, labels)
   return loss.mean()
 
-def get_next_action(feat: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, eps: float) -> Tuple[int, float]:
+def get_next_action(obs: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, eps: float) -> int:
   # epsilon-greedy policy
   valid_action_mask = np.zeros((len(actions)+1), dtype=np.float32)
   for x in get_linearizer_actions(lin): valid_action_mask[x] = 1
   if np.random.random() < eps:
-    q_val = np.zeros((len(actions),))
     idx = np.random.choice(len(valid_action_mask), p=valid_action_mask/sum(valid_action_mask))
   else:
-    idx, q_val = get_greedy_action(feat, q_net, target_net, valid_action_mask)
-  return idx, q_val
+    idx = get_greedy_action(obs, q_net, target_net, valid_action_mask)
+  return idx
 
-def get_greedy_action(feat, q_net, target_net, valid_action_mask, double_learning=True) -> Tuple[int, Tensor]:
-  inputs = Tensor(feat)
+def get_greedy_action(obs, q_net, target_net, valid_action_mask, double_learning=True) -> int:
   if double_learning:
-    q_vals = q_net(inputs)
+    q_vals = q_net(obs)
   else:
-    q_vals = target_net(inputs)
+    q_vals = target_net(obs)
   q_vals = q_vals.detach()
   q_vals = (q_vals + 1e6) * Tensor(valid_action_mask) # hack to select best valid action when all valid actions are negative 
   idx = q_vals.argmax().numpy()
-  return idx, q_vals
+  return idx
 
 def train(ast_strs, q_net, target_net, optim):
   expreplay = ExpReplay()
@@ -149,7 +143,7 @@ def train(ast_strs, q_net, target_net, optim):
     step = 0
     while 1:
       cur_obs = next_obs
-      act, q_val = get_next_action(cur_obs, q_net, target_net, lin, eps)
+      act = get_next_action(cur_obs, q_net, target_net, lin, eps)
       if act == 0:
         rew = 0
         break
@@ -272,7 +266,7 @@ def main():
   ast_strs = load_worlds()
   train(ast_strs, q_net, target_net, optim)
 
-# TODO: save epsilon and other metadata for full reload
+# TODO: save epsilon and other metadata to restore run fully
 if __name__ == "__main__":
   try:
     import wandb
