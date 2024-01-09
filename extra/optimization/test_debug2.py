@@ -1,16 +1,5 @@
 
 from tinygrad import Tensor
-<<<<<<< Updated upstream
-
-a = Tensor.randn(10, requires_grad=True)
-loss = (a*(a ^ 0)).sum().backward()
-print(a.grad.numpy())
-
-import torch
-a = torch.autograd.Variable(torch.Tensor(a.numpy()), requires_grad=True)
-loss = (a*(a ^ 0)).sum().backward()
-print(a.grad)
-=======
 import torch
 
 # t1 = torch.ones(4, requires_grad=True)
@@ -35,4 +24,3 @@ b = torch.autograd.Variable(torch.Tensor(t.numpy()), requires_grad=True)
 # tt1 = torch.ones(4, requires_grad=True)
 # tt2 = torch.ones(4, requires_grad=True)
 # (tt1 == tt2).sum().backward()
->>>>>>> Stashed changes
