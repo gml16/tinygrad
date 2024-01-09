@@ -85,3 +85,14 @@ loss.backward()
 # optim.step()
 print(loss.numpy())
 
+# import torch
+
+# rand1 = Tensor.randn(10)
+# rand2 = Tensor.randn(10)
+
+# loss = l1_loss_smooth(rand1, rand2)
+# loss2 = l1_loss_smooth_2(rand1, rand2)
+
+# print("l1", loss.numpy())
+# print("l2", loss2.numpy())
+# assert (loss.numpy() == loss2.numpy()).all()

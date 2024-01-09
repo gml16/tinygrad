@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import math, random, traceback
+import math, traceback
 from datetime import datetime
 from typing import List, NamedTuple, Tuple
 from tinygrad import Tensor, TinyJit
@@ -8,29 +8,36 @@ from tinygrad.nn import Linear
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
 from tinygrad.features.search import actions, bufs_from_lin, time_linearizer, get_linearizer_actions
 from tinygrad.nn.optim import Adam
-from tinygrad.helpers import dtypes
+from tinygrad.tensor import dtypes
 from tinygrad.codegen.linearizer import Linearizer
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 
 
-USE_WANDB = True
+USE_WANDB = False
+SAVED_MODEL_PATH = "/tmp/dqn.safetensors" # if path does not exist the model is initialised from scratch
 BS = 4
 DELTA = 1e-4
 MIN_EPSILON = 0.1
 GAMMA = 0.9
 EXP_REPLAY_SIZE = 10000
 TRAIN_FREQ = 1
+EVAL_FREQ = 100
 SAVE_FREQ = 100
 TARGET_UPDATE_FREQ = 200
 LR = 1e-4
+OBS_STACK = 4
+LIN_FEAT_SIZE = 1021
+RNG_SEED = 0
 
+# TODO: project feats into a same latent space
 INNER = 256
 class DQN:
   def __init__(self):
-    self.l1 = Linear(1021,INNER)
+    self.l1 = Linear(OBS_STACK*LIN_FEAT_SIZE,INNER)
     self.l2 = Linear(INNER,INNER)
     self.l3 = Linear(INNER,1+len(actions))
-  def __call__(self, x):
+  def __call__(self, x: Tensor) -> Tensor:
+    x = x.reshape(BS, OBS_STACK*LIN_FEAT_SIZE, *x.shape[3:])
     x = self.l1(x).relu()
     x = self.l2(x).relu().dropout(0.9)
     return self.l3(x)
@@ -71,9 +78,15 @@ class ExpReplay:
       self.terminals[self.idx] = transition.terminal
     self.idx = (self.idx + 1) % EXP_REPLAY_SIZE
     assert len(self.cur_feats) == len(self.next_feats) == len(self.acts) == len(self.rews) == len(self.terminals), f"{len(self.cur_feats)}, {len(self.next_feats)}, {len(self.acts)}, {len(self.rews)}, {len(self.terminals)}"
-  def sample(self):
+  def sample(self) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     ids = np.random.choice(len(self.cur_feats), BS)
-    return self.cur_feats[ids], self.next_feats[ids], self.acts[ids], self.rews[ids], self.terminals[ids]
+    return (Tensor.stack(self.cur_feats[ids]), Tensor.stack(self.next_feats[ids]), 
+            Tensor(self.acts[ids]), Tensor(self.rews[ids], dtype=dtypes.float), 
+            Tensor(self.terminals[ids]))
+
+def l1_loss_smooth(predictions: Tensor, targets: Tensor, beta = 1.0):
+    diff = predictions-targets
+    return (0.5*diff**2 / beta).clip(0, 0.5) + (diff.abs() - beta).relu()
 
 def l1_loss_smooth(predictions: Tensor, targets: Tensor, beta = 1.0):
     diff = predictions-targets
@@ -81,11 +94,9 @@ def l1_loss_smooth(predictions: Tensor, targets: Tensor, beta = 1.0):
 
 def calculate_loss(q_net: DQN, target_net: DQN, transitions: Tuple) -> Tensor:
   # Transitions are tuple of shape (states, actions, rewards, next_states, dones)
-  curr_state = Tensor(transitions[0])
-  next_state = Tensor(transitions[1])
-  act = Tensor(transitions[2]).unsqueeze(-1)
-  rew = Tensor(transitions[3]).clip(-1, 1)
-  terminal = Tensor(transitions[4])
+  curr_state, next_state, act, rew, terminal = transitions
+  act = act.unsqueeze(-1)
+  rew = rew.clip(-1, 1)
   y = target_net(next_state)
   max_target_net = y.max(-1)
   net_pred = q_net(curr_state)
@@ -107,7 +118,7 @@ def get_next_action(feat: Tensor, q_net: DQN, target_net: DQN, lin: Linearizer, 
     idx, q_val = get_greedy_action(feat, q_net, target_net, valid_action_mask)
   return idx, q_val
 
-def get_greedy_action(feat, q_net, target_net, valid_action_mask, double_learning=True):
+def get_greedy_action(feat, q_net, target_net, valid_action_mask, double_learning=True) -> Tuple[int, Tensor]:
   inputs = Tensor(feat)
   if double_learning:
     q_vals = q_net(inputs)
@@ -115,7 +126,7 @@ def get_greedy_action(feat, q_net, target_net, valid_action_mask, double_learnin
     q_vals = target_net(inputs)
   q_vals = q_vals.detach()
   q_vals = (q_vals + 1e6) * Tensor(valid_action_mask) # hack to select best valid action when all valid actions are negative 
-  idx = q_vals.argmax().cast(dtypes.int64).numpy() # PR to remove the need to do this
+  idx = q_vals.argmax().numpy()
   return idx, q_vals
 
 def train(ast_strs, q_net, target_net, optim):
@@ -127,7 +138,8 @@ def train(ast_strs, q_net, target_net, optim):
     idx = np.random.choice(ast_strs)
     lin = ast_str_to_lin(idx)
     try:
-      next_feat = lin_to_feats(lin)
+      next_feat = Tensor(lin_to_feats(lin))
+      next_obs = init_stack_obs(next_feat)
       rawbufs = bufs_from_lin(lin)
       tm = last_tm = base_tm = time_linearizer(lin, rawbufs)
     except:
@@ -136,14 +148,15 @@ def train(ast_strs, q_net, target_net, optim):
       continue
     step = 0
     while 1:
-      cur_feat = next_feat
-      act, q_val = get_next_action(cur_feat, q_net, target_net, lin, eps)
+      cur_obs = next_obs
+      act, q_val = get_next_action(cur_obs, q_net, target_net, lin, eps)
       if act == 0:
         rew = 0
         break
       try:
         lin.apply_opt(actions[act-1])
-        next_feat = lin_to_feats(lin)
+        next_feat = Tensor(lin_to_feats(lin))
+        next_obs = stack_obs(cur_obs, next_feat)
         tm = time_linearizer(lin, rawbufs)
         if math.isinf(tm): raise Exception("failed")
         rew = (last_tm-tm)/base_tm
@@ -151,14 +164,13 @@ def train(ast_strs, q_net, target_net, optim):
       except:
         rew = -0.5
         break
-      expreplay.insert(Transition(cur_feat, next_feat, act, rew, False))
+      expreplay.insert(Transition(cur_obs, next_obs, act, rew, False))
       step+=1
-    expreplay.insert(Transition(cur_feat, next_feat, act, rew, True))
+    expreplay.insert(Transition(cur_obs, next_obs, act, rew, True))
     episode += 1
     eps = max(MIN_EPSILON, eps-DELTA)
     print(f"***** {episode=} {step=} {eps=} {base_tm*1e6:12.2f} -> {tm*1e6:12.2f} : {lin.colored_shape()}")
     wandb_log({"episode": episode, "epsilon": eps, "steps": step, "tm_diff": (base_tm-last_tm)/base_tm})
-
     if episode % TRAIN_FREQ == 0:
       Tensor.no_grad, Tensor.training = False, True
       batch = expreplay.sample()
@@ -172,6 +184,42 @@ def train(ast_strs, q_net, target_net, optim):
         safe_save(get_state_dict(q_net), model_path)
     if episode % TARGET_UPDATE_FREQ == 0:
       copy_dqn_to_target(q_net, target_net)
+    if episode % EVAL_FREQ == 0:
+      evaluate_net(episode, ast_strs, q_net, target_net)
+
+def evaluate_net(episode, ast_strs, q_net, target_net):
+  Tensor.no_grad, Tensor.training = True, False
+  tries = 0
+  while 1:
+    idx = np.random.choice(ast_strs)
+    lin = ast_str_to_lin(idx)
+    try:
+      next_feat = Tensor(lin_to_feats(lin))
+      next_obs = init_stack_obs(next_feat)
+      rawbufs = bufs_from_lin(lin)
+      last_tm = base_tm = time_linearizer(lin, rawbufs)
+      break
+    except:
+      tries += 1
+      if tries > 10:
+        print("lin to time during evaluation failed 10 times")
+        break
+      continue
+  while 1:
+    cur_obs = next_obs
+    act, _ = get_next_action(cur_obs, q_net, target_net, lin, eps=0)
+    if act == 0:
+      break
+    try:
+      lin.apply_opt(actions[act-1])
+      next_feat = Tensor(lin_to_feats(lin))
+      next_obs = stack_obs(cur_obs, next_feat)
+      tm = time_linearizer(lin, rawbufs)
+      if math.isinf(tm): raise Exception("failed")
+      last_tm = tm
+    except:
+      break
+    wandb_log({"episode": episode, "eval_tm_diff": (base_tm-last_tm)/base_tm})
 
 def wandb_log(*args, **kwargs):
   if USE_WANDB: wandb.log(*args, **kwargs)
@@ -183,33 +231,51 @@ def copy_dqn_to_target(q_net, target_net):
   load_state_dict(target_net, state_dict, verbose=False)
   for v in state_dict.values(): v.requires_grad = True
 
-# TODO:
-# Stack past 4 observations as the state
-if __name__ == "__main__":
-  if USE_WANDB:
-    try:
-      import wandb
-      wandb.login()
-      run = wandb.init(
-        project="tinygrad-rl",
-        config={
-            "batch_size": BS,
-            "delta": DELTA,
-            "min_epsilon": MIN_EPSILON,
-            "gamma": GAMMA,
-            "exp_replay_size": EXP_REPLAY_SIZE,
-            "train_freq": TRAIN_FREQ,
-            "target_update_freq": TARGET_UPDATE_FREQ,
-            "learning_rate": LR,
-        },
-      )
-    except:
-      USE_WANDB = False
+def stack_obs(current_stack: Tensor, new_feat: Tensor) -> Tensor:
+  return new_feat.unsqueeze(0).cat(current_stack[:-1])
 
+def init_stack_obs(new_feat: Tensor) -> Tensor:
+  empty_obs = Tensor.zeros_like(new_feat.unsqueeze(0)).repeat([OBS_STACK] + [1 for _ in new_feat.shape])
+  return stack_obs(empty_obs, new_feat)
+
+def main():
+  if USE_WANDB:
+    wandb.login()
+    run = wandb.init(
+      project="tinygrad-rl",
+      config={
+          "batch_size": BS,
+          "delta": DELTA,
+          "min_epsilon": MIN_EPSILON,
+          "gamma": GAMMA,
+          "exp_replay_size": EXP_REPLAY_SIZE,
+          "train_freq": TRAIN_FREQ,
+          "target_update_freq": TARGET_UPDATE_FREQ,
+          "learning_rate": LR,
+          "dqn_layers": " / ".join(list(get_state_dict(DQN()).keys())),
+          "dqn_inner_size": INNER,
+          "rng_seed": RNG_SEED,
+          "obs_stack": OBS_STACK,
+          "lin_feat_size": LIN_FEAT_SIZE
+      },
+    )
+   
+  np.random.seed(RNG_SEED)
   q_net = DQN()
   target_net = DQN()
   copy_dqn_to_target(q_net, target_net)
-  if os.path.isfile("/tmp/dqn.safetensors"): load_state_dict(q_net, safe_load("/tmp/dqn.safetensors"))
+  if os.path.isfile(SAVED_MODEL_PATH): 
+    print(f"loading model from {SAVED_MODEL_PATH}")
+    load_state_dict(q_net, safe_load(SAVED_MODEL_PATH))
+  else: print(f"no model to load from {SAVED_MODEL_PATH}")
   optim = Adam(get_parameters(q_net), LR)
   ast_strs = load_worlds()
   train(ast_strs, q_net, target_net, optim)
+
+# TODO: save epsilon and other metadata for full reload
+if __name__ == "__main__":
+  try:
+    import wandb
+  except:
+    USE_WANDB = False
+  main()

@@ -344,7 +344,7 @@ class TestIndexExpressions2d(unittest.TestCase):
     self.st.reshape((2,3,5,2,5))
     assert len(self.st.views) == 1
     v = self.st.views[-1]
-    assert v.strides == (15, 5, 1, 75, 15) and v.mask == ((0, 1), (0, 3), (0, 5), (0, 1), (0, 5))
+    assert v.strides == (0, 5, 1, 0, 15) and v.mask == ((0, 1), (0, 3), (0, 5), (0, 1), (0, 5))
     self.st.assert_same()
 
   def test_combining_big(self):
@@ -354,6 +354,13 @@ class TestIndexExpressions2d(unittest.TestCase):
     assert len(self.st.views) == 1
     v = self.st.views[-1]
     assert v.strides == (0, 0, 0, 1, 0, 0) and v.mask == ((0, 1), (0, 1), (0, 1), (30, 75), (0, 1), (0, 1)) and v.offset == -30
+    self.st.assert_same()
+
+  def test_pad_reshape(self):
+    self.st = CheckingShapeTracker((4,))
+    self.st.pad(((2,2),))
+    self.st.reshape((4,2))
+    assert len(self.st.views) == 1
     self.st.assert_same()
 
 class TestSimplifyingShapeTracker(unittest.TestCase):
@@ -790,35 +797,35 @@ class TestGetContraction(unittest.TestCase):
 class TestShapeTrackerSize(unittest.TestCase):
   def test_simple_size(self):
     st = ShapeTracker.from_shape((100, 100))
-    self.assertEqual(st.size(), 100*100)
+    self.assertEqual(st.real_size(), 100*100)
 
   def test_expand_size(self):
     st = ShapeTracker.from_shape((100, 100))
     st = st.reshape((100, 100, 1))
     st = st.expand((100, 100, 100))
-    self.assertEqual(st.size(), 100*100)
+    self.assertEqual(st.real_size(), 100*100)
 
   def test_expand_size_flatten(self):
     st = ShapeTracker.from_shape((100, 100))
     st = st.reshape((100, 100, 1))
     st = st.expand((100, 100, 100))
     st = st.reshape((100*100*100,))
-    self.assertEqual(st.size(), 100*100)
+    self.assertEqual(st.real_size(), 100*100)
 
   def test_shrink_size_axis_0(self):
     st = ShapeTracker.from_shape((100, 100))
     st = st.shrink(((0, 50), (0, 100)))
-    self.assertEqual(st.size(), 50*100)
+    self.assertEqual(st.real_size(), 50*100)
 
   def test_shrink_size_axis_0_variable(self):
     st = ShapeTracker.from_shape((100, 100))
     st = st.shrink(((0, Variable("a", 0, 50)), (0, 100)))
-    self.assertEqual(st.size(), 50*100)
+    self.assertEqual(st.real_size(), 50*100)
 
   def test_shrink_size_axis_1(self):
     st = ShapeTracker.from_shape((100, 100))
     st = st.shrink(((0, 100), (0, 50)))
-    self.assertEqual(st.size(), 9950)    # careful here
+    self.assertEqual(st.real_size(), 9950)    # careful here
 
 if __name__ == '__main__':
   unittest.main()
